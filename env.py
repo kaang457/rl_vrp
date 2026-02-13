@@ -3,24 +3,24 @@ import torch
 class CVRPEnv:
     def __init__(self, depot, locs, demands, capacity, device="cpu"):  # ortam kurar
         self.device = device
-        self.depot = depot.to(device)
-        self.locs = locs.to(device)
-        self.demands = demands.to(device).float()
+        self.depot = depot.to(device).detach()
+        self.locs = locs.to(device).detach()
+        self.demands = demands.to(device).float().detach()
         self.capacity = float(capacity)
 
         B, N, _ = self.locs.shape
         self.B, self.N = B, N
         self.depot_idx = N
 
-        self.remaining = self.demands.clone()
+        self.remaining = self.demands.clone().detach()
         self.remaining_load = torch.full((B,), self.capacity, device=device)
-        self.current = self.depot.clone()
+        self.current = self.depot.clone().detach()
         self.total_dist = torch.zeros((B,), device=device)
 
-    def done(self): 
+    def done(self):  # bitiş kontrol
         return (self.remaining <= 0).all(dim=1)
 
-    def mask(self): 
+    def mask(self):  # uygun aksiyon maskesi
         B, N = self.B, self.N
         feas = torch.ones((B, N + 1), dtype=torch.bool, device=self.device)
 
@@ -29,31 +29,38 @@ class CVRPEnv:
         feas[:, :N] = demand_pos & load_ok
         return feas
 
-    def step(self, action): 
+    def step(self, action):  # adım atar
         B, N = self.B, self.N
         action = action.to(self.device)
+        idx = torch.arange(B, device=self.device)
         is_depot = action == self.depot_idx
 
         next_xy = torch.where(
             is_depot[:, None],
             self.depot,
-            self.locs[torch.arange(B), action.clamp_max(N-1)]
+            self.locs[idx, action.clamp_max(N - 1)]
         )
 
-        self.total_dist += torch.norm(self.current - next_xy, dim=-1)
-        self.current = next_xy
+        self.total_dist = self.total_dist + torch.norm(self.current - next_xy, dim=-1)
+        self.current = next_xy.detach()
 
-        self.remaining_load = torch.where(
+        new_load = torch.where(
             is_depot,
             torch.full_like(self.remaining_load, self.capacity),
             self.remaining_load
         )
 
-        idx = torch.arange(B)
-        chosen_customer = ~is_depot
-        if chosen_customer.any():
-            a = action[chosen_customer]
-            bidx = idx[chosen_customer]
+        chosen = ~is_depot
+        if chosen.any():
+            a = action[chosen]
+            bidx = idx[chosen]
             served = self.remaining[bidx, a]
-            self.remaining[bidx, a] = 0.0
-            self.remaining_load[bidx] -= served
+
+            new_remaining = self.remaining.clone()
+            new_remaining[bidx, a] = 0.0
+            self.remaining = new_remaining.detach()
+
+            new_load = new_load.clone()
+            new_load[bidx] = new_load[bidx] - served
+
+        self.remaining_load = new_load.detach()
